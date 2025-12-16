@@ -1,0 +1,13 @@
+version: '3.8'
+
+# 此文件用于在有网络的环境下构建镜像
+# 使用方法: docker-compose -f docker-compose.build.yml build
+# 构建完成后，可以将镜像导出到内网环境使用
+
+services:
+  ai-benchmark:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ai-benchmark:latest
+

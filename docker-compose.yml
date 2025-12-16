@@ -1,0 +1,59 @@
+version: '3.8'
+
+services:
+  ai-benchmark:
+    # 使用已构建好的镜像（适用于内网无网环境）
+    # 构建镜像命令（在有网络的环境下执行）:
+    #   docker build -t ai-benchmark:latest .
+    # 或者使用 docker-compose build（在有网络的环境下）:
+    #   docker-compose -f docker-compose.build.yml build
+    # 然后将镜像导出/导入到内网环境:
+    #   导出: docker save ai-benchmark:latest | gzip > ai-benchmark.tar.gz
+    #   导入: docker load < ai-benchmark.tar.gz
+    image: ai-benchmark:latest
+    container_name: ai-benchmark-test
+    # 代码采用外挂方式，方便随时整改
+    volumes:
+      # 挂载源代码目录
+      - ./src:/app/src:ro
+      # 挂载配置文件目录（可读写，方便修改配置）
+      - ./configs:/app/configs:rw
+      # 挂载数据目录（可读写，保存测试结果）
+      - ./data:/app/data:rw
+      # 挂载文档目录（只读）
+      - ./docs:/app/docs:ro
+    # 设置工作目录
+    working_dir: /app
+    # 网络模式：none 表示完全无网环境
+    network_mode: "none"
+    # 环境变量
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+    # 默认命令：显示帮助信息
+    # 实际运行测试时，使用 docker-compose run 或 exec 执行
+    command: >
+      sh -c "
+        echo '========================================';
+        echo 'AI Benchmark 测试环境已就绪';
+        echo '========================================';
+        echo '';
+        echo '可用命令：';
+        echo '  运行测试: docker-compose run --rm ai-benchmark python src/stream_test_enhanced.py -c configs/config_dify.json';
+        echo '  进入容器: docker-compose run --rm ai-benchmark /bin/bash';
+        echo '  查看版本: docker-compose run --rm ai-benchmark python --version';
+        echo '';
+        echo '当前环境：';
+        python --version;
+        python -c 'import aiohttp; print(f\"aiohttp: {aiohttp.__version__}\")';
+        echo '';
+        echo '文件结构：';
+        ls -la /app/;
+        echo '';
+        echo '等待命令...';
+        tail -f /dev/null
+      "
+    # 保持容器运行（用于交互式使用）
+    stdin_open: true
+    tty: true
+

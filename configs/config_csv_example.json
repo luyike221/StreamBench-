@@ -3,11 +3,11 @@
     "method": "POST",
     "headers": {
       "Content-Type": "application/json",
-      "Authorization": "Bearer sk-xxxxxxxxxxxxxxxx"
+      "Authorization": "Bearer app-meDTTbhu8EFfPVPcoWvbnFIu"
     },
     "data_source": {
       "type": "csv",
-      "file": "test_data.csv",
+      "file": "../data/test_data.csv",
       "column": "content",
       "encoding": "utf-8"
     },
@@ -25,5 +25,5 @@
     },
     "timeout": 300,
     "concurrency": 10,
-    "total_requests": 100
+    "total_requests": 1
   }

@@ -1,6 +1,8 @@
 # 流式接口并发测试工具
 
-专门用于测试流式API（如ChatGPT、Claude等）的并发性能，精确测量首token时间(TTFT)和总体性能。
+**通用流式接口测试工具** - 可以测试任何支持HTTP流式响应的API（如ChatGPT、Claude、Dify等），精确测量首token时间(TTFT)和总体性能。
+
+> 📖 **通用性说明**: 查看 [UNIVERSAL_STREAMING_API.md](UNIVERSAL_STREAMING_API.md) 了解如何测试任何流式接口
 
 ## 核心特性
 
@@ -13,15 +15,46 @@
 
 ## 安装依赖
 
+### 使用 uv（推荐）
+
+本项目使用 [uv](https://github.com/astral-sh/uv) 进行依赖管理，速度更快：
+
+```bash
+# 安装 uv（如果还没有安装）
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# 同步依赖（会自动创建虚拟环境并安装依赖）
+uv sync
+
+# 运行脚本
+uv run python stream_test_enhanced.py -c config.json
+```
+
+📖 **详细使用说明**：查看 [UV_USAGE.md](UV_USAGE.md) 了解完整的 uv 命令和最佳实践。
+
+### 使用 pip（传统方式）
+
 ```bash
 pip install aiohttp
 ```
+
+## 项目结构
+
+```
+ai_benchmark/
+├── src/          # 代码部分
+├── configs/      # 配置部分
+├── data/         # 数据备份
+└── docs/         # 文档
+```
+
+📖 **详细结构说明**: 查看 [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md)
 
 ## 快速开始
 
 ### 方式1: 使用配置文件（推荐）
 
-1. 编辑 `config.json` 配置你的接口信息：
+1. 编辑 `configs/config.json` 配置你的接口信息：
 
 ```json
 {
@@ -48,7 +81,7 @@ pip install aiohttp
 2. 运行测试：
 
 ```bash
-python stream_test_enhanced.py -c config.json
+uv run python src/stream_test_enhanced.py -c configs/config.json
 ```
 
 ### 方式2: 使用命令行参数

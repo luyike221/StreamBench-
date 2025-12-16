@@ -34,8 +34,9 @@ class RequestMetrics:
     """单个请求的性能指标"""
     request_id: int
     start_time: float
-    first_token_time: Optional[float] = None
-    end_time: Optional[float] = None
+    response_headers_time: Optional[float] = None  # HTTP响应头接收完成时间
+    first_token_time: Optional[float] = None      # 第一个数据chunk到达时间
+    end_time: Optional[float] = None               # 流式响应结束时间
     total_tokens: int = 0
     total_bytes: int = 0
     error: Optional[str] = None
@@ -125,25 +126,50 @@ class StreamTester:
             ) as response:
                 
                 if response.status != 200:
-                    metric.error = f"HTTP {response.status}"
+                    # 读取错误响应内容以便调试
+                    try:
+                        error_body = await response.text()
+                        # 尝试解析JSON错误信息
+                        try:
+                            error_json = json.loads(error_body)
+                            error_msg = error_json.get('message', error_body)
+                        except:
+                            error_msg = error_body
+                        metric.error = f"HTTP {response.status}: {error_msg[:200]}"
+                        print(f"[{request_id:03d}] ❌ 错误详情: {error_msg}")
+                    except Exception as e:
+                        metric.error = f"HTTP {response.status} (无法读取错误信息: {e})"
                     metric.end_time = time.time()
                     return metric
                 
+                # 记录HTTP响应头接收完成时间（流式连接建立）
+                metric.response_headers_time = time.time()
+                
                 # 读取流式响应
                 chunk_count = 0
+                stream_started = False
+                buffer = b""
+                
                 async for chunk in response.content.iter_any():
                     if chunk:
-                        # 记录首token时间
-                        if metric.first_token_time is None:
+                        # 记录首token时间（第一个数据chunk到达）
+                        if not stream_started:
+                            stream_started = True
                             metric.first_token_time = time.time()
                             ttft = metric.ttft
-                            print(f"[{request_id:03d}] 首token: {ttft:.3f}s")
+                            print(f"[{request_id:03d}] 流式开始: {ttft:.3f}s")
                         
                         chunk_count += 1
                         metric.total_bytes += len(chunk)
+                        buffer += chunk
                 
+                # 流式结束：async for循环退出表示连接关闭
                 metric.total_tokens = chunk_count
                 metric.end_time = time.time()
+                
+                # 可选：检查是否有明确的结束标记（如SSE格式的 [DONE]）
+                if buffer and b'[DONE]' in buffer:
+                    print(f"[{request_id:03d}] 检测到流式结束标记")
                 
                 print(f"[{request_id:03d}] 完成: {metric.total_time:.3f}s | "
                       f"{metric.total_tokens} chunks | "
@@ -162,20 +188,23 @@ class StreamTester:
         return metric
     
     async def worker(self, session: aiohttp.ClientSession, request_queue: asyncio.Queue):
-        """工作协程"""
+        """工作协程 - 保证固定并发数：任务完成后立即领取下一个任务"""
         while True:
             try:
-                request_id = await request_queue.get()
-                
-                if request_id is None:
-                    request_queue.task_done()
-                    break
-                
-                # 控制并发数
+                # 先获取并发许可，确保只有获得许可的worker才能执行任务
                 async with self.semaphore:
+                    # 获取任务（在semaphore保护下，确保并发控制）
+                    request_id = await request_queue.get()
+                    
+                    if request_id is None:
+                        request_queue.task_done()
+                        break
+                    
+                    # 计算当前活跃的并发数
                     active = self.concurrency - self.semaphore._value
                     print(f"\n[{request_id:03d}] 开始 (活跃: {active}/{self.concurrency})")
                     
+                    # 执行请求（在semaphore保护下，完成后会自动释放）
                     metric = await self.make_request(session, request_id)
                     self.metrics.append(metric)
                     
@@ -186,9 +215,17 @@ class StreamTester:
                     print(f"进度: {self.completed_count}/{self.total_requests} | "
                           f"已用时: {elapsed:.1f}s")
                     
+                    # 任务完成后，semaphore自动释放，worker立即回到循环开始
+                    # 再次尝试获取semaphore，如果成功则立即领取下一个任务
+                    # 这样保证了始终维持固定并发数
+                    
             except Exception as e:
                 print(f"Worker错误: {e}")
-                request_queue.task_done()
+                # 确保异常时也标记任务完成
+                try:
+                    request_queue.task_done()
+                except ValueError:
+                    pass  # 如果任务未在队列中，忽略错误
     
     async def run(self):
         """运行测试"""
@@ -291,7 +328,7 @@ class StreamTester:
         
         self.save_results()
     
-    def save_results(self, filename: str = "test_results.json"):
+    def save_results(self, filename: str = "data/test_results.json"):
         """保存结果到JSON"""
         results = {
             "config": {

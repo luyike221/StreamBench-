@@ -1,0 +1,9 @@
+[project]
+name = "ai-benchmark"
+version = "0.1.0"
+description = "流式接口并发测试工具 - 专门用于测试流式API的并发性能，精确测量首token时间(TTFT)和总体性能"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "aiohttp>=3.13.0",
+]
