@@ -5,22 +5,16 @@ FROM python:3.11-slim as builder
 # 设置工作目录
 WORKDIR /build
 
-# 安装系统依赖（构建 uv 和 Python 包所需）
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*
-
-# 安装 uv
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-ENV PATH="/root/.cargo/bin:$PATH"
+# 升级 pip 并安装依赖管理工具
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
 # 复制项目依赖文件
-COPY pyproject.toml uv.lock ./
+COPY pyproject.toml ./
 
-# 使用 uv 同步依赖（创建虚拟环境并安装所有依赖）
-# 使用 --frozen 确保使用锁文件中的精确版本
-RUN uv sync --frozen --no-dev
+# 创建虚拟环境并安装依赖
+RUN python -m venv /build/.venv && \
+    /build/.venv/bin/pip install --no-cache-dir --upgrade pip && \
+    /build/.venv/bin/pip install --no-cache-dir aiohttp>=3.13.0
 
 # 阶段2: 运行阶段 - 最小化镜像
 FROM python:3.11-slim

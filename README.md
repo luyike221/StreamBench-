@@ -11,6 +11,7 @@
 ✅ **完整性能指标** - 统计P50/P90/P95/P99等关键指标  
 ✅ **灵活配置** - 支持配置文件和命令行参数  
 ✅ **CSV数据源支持** - 从CSV文件读取测试数据，每次请求使用不同内容  
+✅ **SSE格式支持** - 支持解析 Server-Sent Events 格式（如 Dify 工作流）  
 ✅ **详细报告** - 实时进度显示和完整JSON结果导出  
 
 ## 安装依赖
@@ -213,6 +214,77 @@ content,topic,category
 #### 5. 示例
 
 查看 `config_csv_example.json` 和 `test_data.csv` 获取完整示例。
+
+### SSE 格式支持（Server-Sent Events）
+
+支持解析 SSE 格式的流式响应，特别适用于 Dify 等使用 SSE 格式的 API。
+
+#### 1. SSE 格式说明
+
+SSE 格式示例（Dify）：
+```
+event: workflow_started
+data: {"workflow_id": "123"}
+
+event: node_started
+data: {"node_id": "node-1"}
+
+event: node_finished
+data: {"node_id": "node-1", "outputs": {"result": "中间结果"}}
+
+event: workflow_finished
+data: {"node_id": "node-llm-1", "outputs": {"result": "最终结果"}}
+```
+
+#### 2. 配置 SSE 格式
+
+在 `config.json` 中添加 `stream_format` 配置：
+
+```json
+{
+  "url": "http://localhost/v1/chat-messages",
+  "method": "POST",
+  "headers": {
+    "Content-Type": "application/json",
+    "Authorization": "Bearer app-xxxxxxxxxxxx"
+  },
+  "body": {
+    "inputs": {},
+    "query": "你的问题",
+    "response_mode": "streaming",
+    "conversation_id": "",
+    "user": "abc-123"
+  },
+  "stream_format": {
+    "type": "sse",
+    "first_token_event": "workflow_started",
+    "completion_event": "workflow_finished",
+    "output_path": "data.outputs.result"
+  },
+  "timeout": 300,
+  "concurrency": 10,
+  "total_requests": 100
+}
+```
+
+#### 3. SSE 配置参数
+
+| 参数 | 类型 | 说明 | 必填 |
+|------|------|------|------|
+| type | string | 流式格式类型，设置为 `"sse"` | 是 |
+| first_token_event | string | 用于识别首token的事件类型（如 `"workflow_started"`） | 否 |
+| completion_event | string | 用于识别完成的事件类型（如 `"workflow_finished"`） | 否 |
+| output_path | string | 从事件数据中提取输出的路径（如 `"data.outputs.result"`） | 否 |
+
+#### 4. 事件识别逻辑
+
+- **首Token事件**: 如果配置了 `first_token_event`，会在收到该事件时记录首token时间；否则使用第一个有事件类型的事件
+- **完成事件**: 如果配置了 `completion_event`，会在收到该事件时提取输出数据；否则自动识别 `workflow_finished` 事件
+- **输出提取**: 使用 `output_path` 从事件数据中提取输出，支持嵌套路径（如 `"data.outputs.result"`）
+
+#### 5. 示例
+
+查看 `configs/config_dify_sse.json` 获取 Dify SSE 格式的完整配置示例。
 
 ## 输出报告
 

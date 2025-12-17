@@ -11,6 +11,7 @@ import json
 import argparse
 import csv
 import os
+import re
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -27,6 +28,12 @@ class RequestConfig:
     timeout: int = 300
     data_source: Optional[Dict] = None
     data_rows: Optional[List[Dict]] = None
+    # 流式格式配置
+    stream_format: Optional[str] = None  # "sse" 或 None（原始流）
+    # SSE 格式配置
+    first_token_event: Optional[str] = None  # 用于识别首token的事件类型（如 "workflow_started"）
+    completion_event: Optional[str] = None  # 用于识别完成的事件类型（如 "workflow_finished"）
+    output_path: Optional[str] = None  # 从事件数据中提取输出的路径（如 "data.outputs.result"）
 
 
 @dataclass
@@ -40,6 +47,7 @@ class RequestMetrics:
     total_tokens: int = 0
     total_bytes: int = 0
     error: Optional[str] = None
+    events: List[Dict] = field(default_factory=list)  # 记录的事件列表（用于SSE格式）
     
     @property
     def ttft(self) -> Optional[float]:
@@ -61,6 +69,120 @@ class RequestMetrics:
         if self.total_time and self.total_time > 0:
             return self.total_tokens / self.total_time
         return None
+
+
+class SSEParser:
+    """Server-Sent Events (SSE) 解析器"""
+    
+    @staticmethod
+    def parse_sse_line(line: bytes) -> Optional[Dict[str, Any]]:
+        """解析单行 SSE 数据
+        
+        格式: event: <event_type>\ndata: <json_data>\n\n
+        """
+        try:
+            line_str = line.decode('utf-8', errors='ignore').strip()
+            if not line_str:
+                return None
+            
+            result = {}
+            
+            # 解析 event: 行
+            if line_str.startswith('event:'):
+                result['event'] = line_str[6:].strip()
+            # 解析 data: 行
+            elif line_str.startswith('data:'):
+                data_str = line_str[5:].strip()
+                result['data'] = data_str
+                # 尝试解析为 JSON
+                try:
+                    result['data_json'] = json.loads(data_str)
+                except:
+                    pass
+            # 解析 id: 行
+            elif line_str.startswith('id:'):
+                result['id'] = line_str[3:].strip()
+            # 解析 retry: 行
+            elif line_str.startswith('retry:'):
+                result['retry'] = line_str[6:].strip()
+            
+            return result if result else None
+        except Exception:
+            return None
+    
+    @staticmethod
+    async def parse_sse_stream(stream) -> List[Dict]:
+        """解析 SSE 流，返回事件列表
+        
+        SSE 格式示例:
+        event: workflow_started
+        data: {"workflow_id": "123"}
+        
+        event: node_started
+        data: {"node_id": "node-1"}
+        
+        event: workflow_finished
+        data: {"node_id": "node-llm-1", "outputs": {"result": "..."}}
+        """
+        events = []
+        buffer = b""
+        current_event: Dict[str, Any] = {}
+        
+        async for chunk in stream:
+            if not chunk:
+                continue
+            
+            buffer += chunk
+            
+            # SSE 格式以 \n\n 分隔完整事件，以 \n 分隔行
+            while b'\n\n' in buffer:
+                # 提取一个完整的事件块
+                event_block, buffer = buffer.split(b'\n\n', 1)
+                
+                # 解析单个事件块
+                event_data: Dict[str, Any] = {}
+                for line in event_block.split(b'\n'):
+                    if not line.strip():
+                        continue
+                    parsed = SSEParser.parse_sse_line(line)
+                    if parsed:
+                        # 合并到当前事件
+                        event_data.update(parsed)
+                
+                # 如果事件有内容，添加到列表
+                if event_data:
+                    events.append(event_data)
+        
+        # 处理剩余的 buffer（可能是不完整的事件）
+        if buffer.strip():
+            for line in buffer.split(b'\n'):
+                if not line.strip():
+                    continue
+                parsed = SSEParser.parse_sse_line(line)
+                if parsed:
+                    current_event.update(parsed)
+            if current_event:
+                events.append(current_event)
+        
+        return events
+    
+    @staticmethod
+    def extract_value(data: Dict, path: str) -> Any:
+        """从嵌套字典中提取值
+        
+        例如: extract_value({"data": {"outputs": {"result": "hello"}}}, "data.outputs.result")
+        返回: "hello"
+        """
+        keys = path.split('.')
+        value = data
+        for key in keys:
+            if isinstance(value, dict):
+                value = value.get(key)
+            else:
+                return None
+            if value is None:
+                return None
+        return value
 
 
 class StreamTester:
@@ -145,45 +267,180 @@ class StreamTester:
                 # 记录HTTP响应头接收完成时间（流式连接建立）
                 metric.response_headers_time = time.time()
                 
-                # 读取流式响应
-                chunk_count = 0
-                stream_started = False
-                buffer = b""
-                
-                async for chunk in response.content.iter_any():
-                    if chunk:
-                        # 记录首token时间（第一个数据chunk到达）
-                        if not stream_started:
-                            stream_started = True
-                            metric.first_token_time = time.time()
-                            ttft = metric.ttft
-                            print(f"[{request_id:03d}] 流式开始: {ttft:.3f}s")
+                # 根据配置选择解析方式
+                if self.config.stream_format == "sse":
+                    # SSE 格式解析 - 实时处理事件
+                    events = []
+                    buffer = b""
+                    current_event: Dict[str, Any] = {}
+                    first_token_found = False
+                    first_event_time = None
+                    event_count = 0
+                    
+                    async for chunk in response.content.iter_any():
+                        if not chunk:
+                            continue
                         
-                        chunk_count += 1
-                        metric.total_bytes += len(chunk)
                         buffer += chunk
-                
-                # 流式结束：async for循环退出表示连接关闭
-                metric.total_tokens = chunk_count
-                metric.end_time = time.time()
-                
-                # 可选：检查是否有明确的结束标记（如SSE格式的 [DONE]）
-                if buffer and b'[DONE]' in buffer:
-                    print(f"[{request_id:03d}] 检测到流式结束标记")
-                
-                print(f"[{request_id:03d}] 完成: {metric.total_time:.3f}s | "
-                      f"{metric.total_tokens} chunks | "
-                      f"{metric.tokens_per_second:.2f} chunks/s | "
-                      f"{metric.total_bytes/1024:.2f} KB")
+                        metric.total_bytes += len(chunk)
+                        
+                        # SSE 格式以 \n\n 分隔完整事件
+                        while b'\n\n' in buffer:
+                            # 提取一个完整的事件块
+                            event_block, buffer = buffer.split(b'\n\n', 1)
+                            
+                            # 解析单个事件块
+                            event_data: Dict[str, Any] = {}
+                            for line in event_block.split(b'\n'):
+                                if not line.strip():
+                                    continue
+                                parsed = SSEParser.parse_sse_line(line)
+                                if parsed:
+                                    event_data.update(parsed)
+                            
+                            # 如果事件有内容，处理它
+                            if event_data:
+                                events.append(event_data)
+                                event_count += 1
+                                data_json = event_data.get('data_json', {})
+                                
+                                # 优先从 data_json 中获取事件类型（Dify 格式）
+                                # 如果没有，再从 SSE 的 event: 行获取
+                                event_type = ''
+                                if isinstance(data_json, dict) and 'event' in data_json:
+                                    event_type = data_json.get('event', '')
+                                elif 'event' in event_data:
+                                    event_type = event_data.get('event', '')
+                                
+                                # 记录第一个事件的时间（作为备选）
+                                if event_count == 1 and not first_token_found:
+                                    first_event_time = time.time()
+                                
+                                # 检查是否是首token事件
+                                if not first_token_found:
+                                    if self.config.first_token_event:
+                                        if event_type == self.config.first_token_event:
+                                            metric.first_token_time = time.time()
+                                            first_token_found = True
+                                            ttft = metric.ttft
+                                            print(f"[{request_id:03d}] 流式开始 ({event_type}): {ttft:.3f}s")
+                                    elif event_type:  # 如果没有配置，使用第一个有事件类型的事件
+                                        metric.first_token_time = time.time()
+                                        first_token_found = True
+                                        ttft = metric.ttft
+                                        print(f"[{request_id:03d}] 流式开始 ({event_type}): {ttft:.3f}s")
+                                
+                                # 检查是否是完成事件
+                                if self.config.completion_event:
+                                    if event_type == self.config.completion_event:
+                                        # 提取输出数据
+                                        if self.config.output_path and data_json:
+                                            output = SSEParser.extract_value(data_json, self.config.output_path)
+                                            if output:
+                                                print(f"[{request_id:03d}] 完成事件 ({event_type}): 输出已提取")
+                                elif event_type == 'workflow_finished':  # Dify 默认完成事件
+                                    if self.config.output_path and data_json:
+                                        output = SSEParser.extract_value(data_json, self.config.output_path)
+                                        if output:
+                                            print(f"[{request_id:03d}] 完成事件 ({event_type}): 输出已提取")
+                    
+                    # 处理剩余的 buffer（可能是不完整的事件）
+                    if buffer.strip():
+                        for line in buffer.split(b'\n'):
+                            if not line.strip():
+                                continue
+                            parsed = SSEParser.parse_sse_line(line)
+                            if parsed:
+                                current_event.update(parsed)
+                        if current_event:
+                            events.append(current_event)
+                            event_count += 1
+                    
+                    # 如果没有找到首token事件，使用第一个事件的时间
+                    if not first_token_found:
+                        if first_event_time:
+                            metric.first_token_time = first_event_time
+                        elif events:
+                            metric.first_token_time = time.time()
+                    
+                    metric.events = events
+                    
+                    # 记录结束时间
+                    metric.end_time = time.time()
+                    metric.total_tokens = len(events)
+                    
+                    # 打印事件统计
+                    event_types = {}
+                    for event in events:
+                        # 优先从 data_json 中获取事件类型（Dify 格式）
+                        data_json = event.get('data_json', {})
+                        if isinstance(data_json, dict) and 'event' in data_json:
+                            event_type = data_json.get('event', 'unknown')
+                        else:
+                            event_type = event.get('event', 'unknown')
+                        event_types[event_type] = event_types.get(event_type, 0) + 1
+                    
+                    event_summary = ', '.join([f'{k}:{v}' for k, v in event_types.items()]) if event_types else '无事件'
+                    print(f"[{request_id:03d}] 完成: {metric.total_time:.3f}s | "
+                          f"{len(events)} 事件 | {event_summary}")
+                else:
+                    # 原始流格式（向后兼容）
+                    chunk_count = 0
+                    stream_started = False
+                    buffer = b""
+                    
+                    async for chunk in response.content.iter_any():
+                        if chunk:
+                            # 记录首token时间（第一个数据chunk到达）
+                            if not stream_started:
+                                stream_started = True
+                                metric.first_token_time = time.time()
+                                ttft = metric.ttft
+                                print(f"[{request_id:03d}] 流式开始: {ttft:.3f}s")
+                            
+                            chunk_count += 1
+                            metric.total_bytes += len(chunk)
+                            buffer += chunk
+                    
+                    # 流式结束：async for循环退出表示连接关闭
+                    metric.total_tokens = chunk_count
+                    metric.end_time = time.time()
+                    
+                    # 可选：检查是否有明确的结束标记（如SSE格式的 [DONE]）
+                    if buffer and b'[DONE]' in buffer:
+                        print(f"[{request_id:03d}] 检测到流式结束标记")
+                    
+                    print(f"[{request_id:03d}] 完成: {metric.total_time:.3f}s | "
+                          f"{metric.total_tokens} chunks | "
+                          f"{metric.tokens_per_second:.2f} chunks/s | "
+                          f"{metric.total_bytes/1024:.2f} KB")
                 
         except asyncio.TimeoutError:
-            metric.error = "Timeout"
+            # 整体超时（包括连接超时、读取超时等）
+            metric.error = f"Timeout (>{self.config.timeout}s)"
             metric.end_time = time.time()
-            print(f"[{request_id:03d}] 超时")
+            elapsed = metric.total_time
+            print(f"[{request_id:03d}] ⏱️  超时 (已等待 {elapsed:.2f}s, 超时限制: {self.config.timeout}s)")
+        except aiohttp.ServerTimeoutError as e:
+            # 服务器响应超时
+            metric.error = f"Server Timeout: {str(e)}"
+            metric.end_time = time.time()
+            elapsed = metric.total_time
+            print(f"[{request_id:03d}] ⏱️  服务器超时 (已等待 {elapsed:.2f}s)")
+        except aiohttp.ClientConnectorError as e:
+            # 连接错误（可能包含连接超时）
+            if "timeout" in str(e).lower() or "timed out" in str(e).lower():
+                metric.error = f"Connection Timeout: {str(e)}"
+                print(f"[{request_id:03d}] ⏱️  连接超时: {e}")
+            else:
+                metric.error = f"Connection Error: {str(e)}"
+                print(f"[{request_id:03d}] ❌ 连接错误: {e}")
+            metric.end_time = time.time()
         except Exception as e:
+            # 其他异常
             metric.error = str(e)
             metric.end_time = time.time()
-            print(f"[{request_id:03d}] 错误: {e}")
+            print(f"[{request_id:03d}] ❌ 错误: {e}")
         
         return metric
     
@@ -237,6 +494,14 @@ class StreamTester:
         print(f"总请求数:    {self.total_requests}")
         if self.config.data_rows:
             print(f"数据源:      CSV ({len(self.config.data_rows)} 行，将循环使用)")
+        if self.config.stream_format:
+            print(f"流式格式:    {self.config.stream_format.upper()}")
+            if self.config.first_token_event:
+                print(f"首Token事件: {self.config.first_token_event}")
+            if self.config.completion_event:
+                print(f"完成事件:    {self.config.completion_event}")
+            if self.config.output_path:
+                print(f"输出路径:    {self.config.output_path}")
         print(f"开始时间:    {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"{'='*70}\n")
         
@@ -349,7 +614,9 @@ class StreamTester:
                     "total_tokens": m.total_tokens,
                     "total_bytes": m.total_bytes,
                     "tokens_per_second": m.tokens_per_second,
-                    "error": m.error
+                    "error": m.error,
+                    "events_count": len(m.events) if m.events else None,
+                    "events": m.events if m.events else None  # 保存完整的事件数据
                 }
                 for m in self.metrics
             ]
@@ -359,6 +626,73 @@ class StreamTester:
             json.dump(results, f, indent=2, ensure_ascii=False)
         
         print(f"详细结果已保存: {filename}")
+        
+        # 保存调试文件（包含所有原始响应数据）
+        self.save_debug_results()
+    
+    def save_debug_results(self, filename: str = "data/debug_responses.json"):
+        """保存调试文件，包含所有请求的完整响应数据"""
+        debug_data = {
+            "config": {
+                "url": self.config.url,
+                "method": self.config.method,
+                "stream_format": self.config.stream_format,
+                "first_token_event": self.config.first_token_event,
+                "timestamp": datetime.now().isoformat()
+            },
+            "total_requests": self.total_requests,
+            "requests": []
+        }
+        
+        for m in self.metrics:
+            request_data = {
+                "request_id": m.request_id,
+                "start_time": m.start_time,
+                "response_headers_time": m.response_headers_time,
+                "first_token_time": m.first_token_time,
+                "end_time": m.end_time,
+                "ttft": m.ttft,
+                "total_time": m.total_time,
+                "error": m.error
+            }
+            
+            # 保存完整的事件数据（SSE格式）
+            if m.events:
+                request_data["events"] = m.events
+                request_data["events_count"] = len(m.events)
+                
+                # 按事件类型分组统计
+                event_summary = {}
+                for event in m.events:
+                    # 优先从 data_json 中获取事件类型（Dify 格式）
+                    data_json = event.get('data_json', {})
+                    if isinstance(data_json, dict) and 'event' in data_json:
+                        event_type = data_json.get('event', 'unknown')
+                    else:
+                        event_type = event.get('event', 'unknown')
+                    if event_type not in event_summary:
+                        event_summary[event_type] = []
+                    event_summary[event_type].append({
+                        "data": event.get('data'),
+                        "data_json": event.get('data_json'),
+                        "id": event.get('id')
+                    })
+                request_data["events_by_type"] = event_summary
+            
+            # 保存原始数据统计
+            request_data["total_tokens"] = m.total_tokens
+            request_data["total_bytes"] = m.total_bytes
+            request_data["tokens_per_second"] = m.tokens_per_second
+            
+            debug_data["requests"].append(request_data)
+        
+        # 确保目录存在
+        os.makedirs(os.path.dirname(filename), exist_ok=True)
+        
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump(debug_data, f, indent=2, ensure_ascii=False)
+        
+        print(f"调试数据已保存: {filename}")
 
 
 def load_csv_data(csv_file: str, column: Optional[str] = None, encoding: str = 'utf-8') -> List[Dict[str, Any]]:
@@ -413,6 +747,9 @@ def load_config(config_file: str) -> tuple:
         else:
             raise ValueError(f"不支持的数据源类型: {source_type}")
     
+    # 流式格式配置
+    stream_config = data.get('stream_format', {})
+    
     config = RequestConfig(
         url=data['url'],
         method=data.get('method', 'POST'),
@@ -420,7 +757,11 @@ def load_config(config_file: str) -> tuple:
         body=data.get('body', {}),
         timeout=data.get('timeout', 300),
         data_source=data_source,
-        data_rows=data_rows
+        data_rows=data_rows,
+        stream_format=stream_config.get('type') if isinstance(stream_config, dict) else stream_config,
+        first_token_event=stream_config.get('first_token_event') if isinstance(stream_config, dict) else None,
+        completion_event=stream_config.get('completion_event') if isinstance(stream_config, dict) else None,
+        output_path=stream_config.get('output_path') if isinstance(stream_config, dict) else None
     )
     
     concurrency = data.get('concurrency', 10)
