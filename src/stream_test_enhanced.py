@@ -18,6 +18,12 @@ from datetime import datetime
 import statistics
 
 
+def log_print(*args, **kwargs):
+    """带日期时间前缀的日志输出函数"""
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    print(f"[{timestamp}]", *args, **kwargs)
+
+
 @dataclass
 class RequestConfig:
     """请求配置"""
@@ -258,7 +264,7 @@ class StreamTester:
                         except:
                             error_msg = error_body
                         metric.error = f"HTTP {response.status}: {error_msg[:200]}"
-                        print(f"[{request_id:03d}] ❌ 错误详情: {error_msg}")
+                        log_print(f"[{request_id:03d}] ❌ 错误详情: {error_msg}")
                     except Exception as e:
                         metric.error = f"HTTP {response.status} (无法读取错误信息: {e})"
                     metric.end_time = time.time()
@@ -323,12 +329,12 @@ class StreamTester:
                                             metric.first_token_time = time.time()
                                             first_token_found = True
                                             ttft = metric.ttft
-                                            print(f"[{request_id:03d}] 流式开始 ({event_type}): {ttft:.3f}s")
+                                            log_print(f"[{request_id:03d}] 流式开始 ({event_type}): {ttft:.3f}s")
                                     elif event_type:  # 如果没有配置，使用第一个有事件类型的事件
                                         metric.first_token_time = time.time()
                                         first_token_found = True
                                         ttft = metric.ttft
-                                        print(f"[{request_id:03d}] 流式开始 ({event_type}): {ttft:.3f}s")
+                                        log_print(f"[{request_id:03d}] 流式开始 ({event_type}): {ttft:.3f}s")
                                 
                                 # 检查是否是完成事件
                                 if self.config.completion_event:
@@ -337,12 +343,7 @@ class StreamTester:
                                         if self.config.output_path and data_json:
                                             output = SSEParser.extract_value(data_json, self.config.output_path)
                                             if output:
-                                                print(f"[{request_id:03d}] 完成事件 ({event_type}): 输出已提取")
-                                elif event_type == 'workflow_finished':  # Dify 默认完成事件
-                                    if self.config.output_path and data_json:
-                                        output = SSEParser.extract_value(data_json, self.config.output_path)
-                                        if output:
-                                            print(f"[{request_id:03d}] 完成事件 ({event_type}): 输出已提取")
+                                                log_print(f"[{request_id:03d}] 完成事件 ({event_type}): 输出已提取")
                     
                     # 处理剩余的 buffer（可能是不完整的事件）
                     if buffer.strip():
@@ -381,7 +382,7 @@ class StreamTester:
                         event_types[event_type] = event_types.get(event_type, 0) + 1
                     
                     event_summary = ', '.join([f'{k}:{v}' for k, v in event_types.items()]) if event_types else '无事件'
-                    print(f"[{request_id:03d}] 完成: {metric.total_time:.3f}s | "
+                    log_print(f"[{request_id:03d}] 完成: {metric.total_time:.3f}s | "
                           f"{len(events)} 事件 | {event_summary}")
                 else:
                     # 原始流格式（向后兼容）
@@ -396,7 +397,7 @@ class StreamTester:
                                 stream_started = True
                                 metric.first_token_time = time.time()
                                 ttft = metric.ttft
-                                print(f"[{request_id:03d}] 流式开始: {ttft:.3f}s")
+                                log_print(f"[{request_id:03d}] 流式开始: {ttft:.3f}s")
                             
                             chunk_count += 1
                             metric.total_bytes += len(chunk)
@@ -408,9 +409,9 @@ class StreamTester:
                     
                     # 可选：检查是否有明确的结束标记（如SSE格式的 [DONE]）
                     if buffer and b'[DONE]' in buffer:
-                        print(f"[{request_id:03d}] 检测到流式结束标记")
+                        log_print(f"[{request_id:03d}] 检测到流式结束标记")
                     
-                    print(f"[{request_id:03d}] 完成: {metric.total_time:.3f}s | "
+                    log_print(f"[{request_id:03d}] 完成: {metric.total_time:.3f}s | "
                           f"{metric.total_tokens} chunks | "
                           f"{metric.tokens_per_second:.2f} chunks/s | "
                           f"{metric.total_bytes/1024:.2f} KB")
@@ -420,27 +421,27 @@ class StreamTester:
             metric.error = f"Timeout (>{self.config.timeout}s)"
             metric.end_time = time.time()
             elapsed = metric.total_time
-            print(f"[{request_id:03d}] ⏱️  超时 (已等待 {elapsed:.2f}s, 超时限制: {self.config.timeout}s)")
+            log_print(f"[{request_id:03d}] ⏱️  超时 (已等待 {elapsed:.2f}s, 超时限制: {self.config.timeout}s)")
         except aiohttp.ServerTimeoutError as e:
             # 服务器响应超时
             metric.error = f"Server Timeout: {str(e)}"
             metric.end_time = time.time()
             elapsed = metric.total_time
-            print(f"[{request_id:03d}] ⏱️  服务器超时 (已等待 {elapsed:.2f}s)")
+            log_print(f"[{request_id:03d}] ⏱️  服务器超时 (已等待 {elapsed:.2f}s)")
         except aiohttp.ClientConnectorError as e:
             # 连接错误（可能包含连接超时）
             if "timeout" in str(e).lower() or "timed out" in str(e).lower():
                 metric.error = f"Connection Timeout: {str(e)}"
-                print(f"[{request_id:03d}] ⏱️  连接超时: {e}")
+                log_print(f"[{request_id:03d}] ⏱️  连接超时: {e}")
             else:
                 metric.error = f"Connection Error: {str(e)}"
-                print(f"[{request_id:03d}] ❌ 连接错误: {e}")
+                log_print(f"[{request_id:03d}] ❌ 连接错误: {e}")
             metric.end_time = time.time()
         except Exception as e:
             # 其他异常
             metric.error = str(e)
             metric.end_time = time.time()
-            print(f"[{request_id:03d}] ❌ 错误: {e}")
+            log_print(f"[{request_id:03d}] ❌ 错误: {e}")
         
         return metric
     
@@ -459,7 +460,7 @@ class StreamTester:
                     
                     # 计算当前活跃的并发数
                     active = self.concurrency - self.semaphore._value
-                    print(f"\n[{request_id:03d}] 开始 (活跃: {active}/{self.concurrency})")
+                    log_print(f"\n[{request_id:03d}] 开始 (活跃: {active}/{self.concurrency})")
                     
                     # 执行请求（在semaphore保护下，完成后会自动释放）
                     metric = await self.make_request(session, request_id)
@@ -469,7 +470,7 @@ class StreamTester:
                     request_queue.task_done()
                     
                     elapsed = time.time() - self.start_time
-                    print(f"进度: {self.completed_count}/{self.total_requests} | "
+                    log_print(f"进度: {self.completed_count}/{self.total_requests} | "
                           f"已用时: {elapsed:.1f}s")
                     
                     # 任务完成后，semaphore自动释放，worker立即回到循环开始
@@ -477,7 +478,7 @@ class StreamTester:
                     # 这样保证了始终维持固定并发数
                     
             except Exception as e:
-                print(f"Worker错误: {e}")
+                log_print(f"Worker错误: {e}")
                 # 确保异常时也标记任务完成
                 try:
                     request_queue.task_done()
@@ -486,24 +487,24 @@ class StreamTester:
     
     async def run(self):
         """运行测试"""
-        print(f"\n{'='*70}")
-        print(f"流式接口并发测试")
-        print(f"{'='*70}")
-        print(f"URL:        {self.config.url}")
-        print(f"并发数:      {self.concurrency}")
-        print(f"总请求数:    {self.total_requests}")
+        log_print(f"\n{'='*70}")
+        log_print(f"流式接口并发测试")
+        log_print(f"{'='*70}")
+        log_print(f"URL:        {self.config.url}")
+        log_print(f"并发数:      {self.concurrency}")
+        log_print(f"总请求数:    {self.total_requests}")
         if self.config.data_rows:
-            print(f"数据源:      CSV ({len(self.config.data_rows)} 行，将循环使用)")
+            log_print(f"数据源:      CSV ({len(self.config.data_rows)} 行，将循环使用)")
         if self.config.stream_format:
-            print(f"流式格式:    {self.config.stream_format.upper()}")
+            log_print(f"流式格式:    {self.config.stream_format.upper()}")
             if self.config.first_token_event:
-                print(f"首Token事件: {self.config.first_token_event}")
+                log_print(f"首Token事件: {self.config.first_token_event}")
             if self.config.completion_event:
-                print(f"完成事件:    {self.config.completion_event}")
+                log_print(f"完成事件:    {self.config.completion_event}")
             if self.config.output_path:
-                print(f"输出路径:    {self.config.output_path}")
-        print(f"开始时间:    {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        print(f"{'='*70}\n")
+                log_print(f"输出路径:    {self.config.output_path}")
+        log_print(f"开始时间:    {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        log_print(f"{'='*70}\n")
         
         self.start_time = time.time()
         
@@ -532,19 +533,19 @@ class StreamTester:
         """打印测试报告"""
         total_elapsed = time.time() - self.start_time
         
-        print(f"\n{'='*70}")
-        print(f"测试报告")
-        print(f"{'='*70}")
+        log_print(f"\n{'='*70}")
+        log_print(f"测试报告")
+        log_print(f"{'='*70}")
         
         successful = [m for m in self.metrics if m.error is None]
         failed = [m for m in self.metrics if m.error is not None]
         
-        print(f"\n【总体统计】")
-        print(f"  总请求数:    {self.total_requests}")
-        print(f"  成功:        {len(successful)} ({len(successful)/self.total_requests*100:.1f}%)")
-        print(f"  失败:        {len(failed)} ({len(failed)/self.total_requests*100:.1f}%)")
-        print(f"  总耗时:      {total_elapsed:.2f}s")
-        print(f"  吞吐量:      {self.total_requests/total_elapsed:.2f} req/s")
+        log_print(f"\n【总体统计】")
+        log_print(f"  总请求数:    {self.total_requests}")
+        log_print(f"  成功:        {len(successful)} ({len(successful)/self.total_requests*100:.1f}%)")
+        log_print(f"  失败:        {len(failed)} ({len(failed)/self.total_requests*100:.1f}%)")
+        log_print(f"  总耗时:      {total_elapsed:.2f}s")
+        log_print(f"  吞吐量:      {self.total_requests/total_elapsed:.2f} req/s")
         
         if successful:
             ttfts = [m.ttft for m in successful if m.ttft is not None]
@@ -553,43 +554,43 @@ class StreamTester:
             
             if ttfts:
                 sorted_ttfts = sorted(ttfts)
-                print(f"\n【首Token时间 (TTFT)】")
-                print(f"  最小值:      {min(ttfts):.3f}s")
-                print(f"  最大值:      {max(ttfts):.3f}s")
-                print(f"  平均值:      {statistics.mean(ttfts):.3f}s")
-                print(f"  中位数:      {statistics.median(ttfts):.3f}s")
+                log_print(f"\n【首Token时间 (TTFT)】")
+                log_print(f"  最小值:      {min(ttfts):.3f}s")
+                log_print(f"  最大值:      {max(ttfts):.3f}s")
+                log_print(f"  平均值:      {statistics.mean(ttfts):.3f}s")
+                log_print(f"  中位数:      {statistics.median(ttfts):.3f}s")
                 if len(ttfts) > 1:
-                    print(f"  标准差:      {statistics.stdev(ttfts):.3f}s")
-                print(f"  P50:         {sorted_ttfts[int(len(sorted_ttfts)*0.50)]:.3f}s")
-                print(f"  P90:         {sorted_ttfts[int(len(sorted_ttfts)*0.90)]:.3f}s")
-                print(f"  P95:         {sorted_ttfts[int(len(sorted_ttfts)*0.95)]:.3f}s")
-                print(f"  P99:         {sorted_ttfts[int(len(sorted_ttfts)*0.99)]:.3f}s")
+                    log_print(f"  标准差:      {statistics.stdev(ttfts):.3f}s")
+                log_print(f"  P50:         {sorted_ttfts[int(len(sorted_ttfts)*0.50)]:.3f}s")
+                log_print(f"  P90:         {sorted_ttfts[int(len(sorted_ttfts)*0.90)]:.3f}s")
+                log_print(f"  P95:         {sorted_ttfts[int(len(sorted_ttfts)*0.95)]:.3f}s")
+                log_print(f"  P99:         {sorted_ttfts[int(len(sorted_ttfts)*0.99)]:.3f}s")
             
             if total_times:
                 sorted_times = sorted(total_times)
-                print(f"\n【总耗时】")
-                print(f"  最小值:      {min(total_times):.3f}s")
-                print(f"  最大值:      {max(total_times):.3f}s")
-                print(f"  平均值:      {statistics.mean(total_times):.3f}s")
-                print(f"  中位数:      {statistics.median(total_times):.3f}s")
-                print(f"  P95:         {sorted_times[int(len(sorted_times)*0.95)]:.3f}s")
-                print(f"  P99:         {sorted_times[int(len(sorted_times)*0.99)]:.3f}s")
+                log_print(f"\n【总耗时】")
+                log_print(f"  最小值:      {min(total_times):.3f}s")
+                log_print(f"  最大值:      {max(total_times):.3f}s")
+                log_print(f"  平均值:      {statistics.mean(total_times):.3f}s")
+                log_print(f"  中位数:      {statistics.median(total_times):.3f}s")
+                log_print(f"  P95:         {sorted_times[int(len(sorted_times)*0.95)]:.3f}s")
+                log_print(f"  P99:         {sorted_times[int(len(sorted_times)*0.99)]:.3f}s")
             
             if tps_list:
-                print(f"\n【生成速率】")
-                print(f"  平均值:      {statistics.mean(tps_list):.2f} chunks/s")
-                print(f"  中位数:      {statistics.median(tps_list):.2f} chunks/s")
-                print(f"  最大值:      {max(tps_list):.2f} chunks/s")
+                log_print(f"\n【生成速率】")
+                log_print(f"  平均值:      {statistics.mean(tps_list):.2f} chunks/s")
+                log_print(f"  中位数:      {statistics.median(tps_list):.2f} chunks/s")
+                log_print(f"  最大值:      {max(tps_list):.2f} chunks/s")
         
         if failed:
-            print(f"\n【失败详情】")
+            log_print(f"\n【失败详情】")
             error_counts = {}
             for m in failed:
                 error_counts[m.error] = error_counts.get(m.error, 0) + 1
             for error, count in error_counts.items():
-                print(f"  {error}: {count}次")
+                log_print(f"  {error}: {count}次")
         
-        print(f"\n{'='*70}\n")
+        log_print(f"\n{'='*70}\n")
         
         self.save_results()
     
@@ -625,7 +626,7 @@ class StreamTester:
         with open(filename, 'w', encoding='utf-8') as f:
             json.dump(results, f, indent=2, ensure_ascii=False)
         
-        print(f"详细结果已保存: {filename}")
+        log_print(f"详细结果已保存: {filename}")
         
         # 保存调试文件（包含所有原始响应数据）
         self.save_debug_results()
@@ -692,7 +693,7 @@ class StreamTester:
         with open(filename, 'w', encoding='utf-8') as f:
             json.dump(debug_data, f, indent=2, ensure_ascii=False)
         
-        print(f"调试数据已保存: {filename}")
+        log_print(f"调试数据已保存: {filename}")
 
 
 def load_csv_data(csv_file: str, column: Optional[str] = None, encoding: str = 'utf-8') -> List[Dict[str, Any]]:
@@ -743,7 +744,7 @@ def load_config(config_file: str) -> tuple:
             encoding = data_source.get('encoding', 'utf-8')
             
             data_rows = load_csv_data(csv_file, column, encoding)
-            print(f"已加载CSV数据: {csv_file} ({len(data_rows)} 行)")
+            log_print(f"已加载CSV数据: {csv_file} ({len(data_rows)} 行)")
         else:
             raise ValueError(f"不支持的数据源类型: {source_type}")
     
@@ -794,7 +795,7 @@ async def main():
         total_requests = args.requests
     else:
         # 使用默认配置（示例）
-        print("未指定配置文件或URL，使用示例配置...")
+        log_print("未指定配置文件或URL，使用示例配置...")
         config = RequestConfig(
             url="https://api.openai.com/v1/chat/completions",
             headers={
